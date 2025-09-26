@@ -1,0 +1,553 @@
+`timescale 10ns / 1ns
+
+module custom_cpu(
+	input         clk,
+	input         rst,
+
+	//Instruction request channel
+	output reg [31:0] PC,
+	output        Inst_Req_Valid,
+	input         Inst_Req_Ready,
+
+	//Instruction response channel
+	input  [31:0] Instruction,
+	input         Inst_Valid,
+	output        Inst_Ready,
+
+	//Memory request channel
+	output [31:0] Address,
+	output        MemWrite,
+	output [31:0] Write_data,
+	output [ 3:0] Write_strb,
+	output        MemRead,
+	input         Mem_Req_Ready,
+
+	//Memory data response channel
+	input  [31:0] Read_data,
+	input         Read_data_Valid,
+	output        Read_data_Ready,
+
+	input         intr,
+
+	output [31:0] cpu_perf_cnt_0,
+	output [31:0] cpu_perf_cnt_1,
+	output [31:0] cpu_perf_cnt_2,
+	output [31:0] cpu_perf_cnt_3,
+	output [31:0] cpu_perf_cnt_4,
+	output [31:0] cpu_perf_cnt_5,
+	output [31:0] cpu_perf_cnt_6,
+	output [31:0] cpu_perf_cnt_7,
+	output [31:0] cpu_perf_cnt_8,
+	output [31:0] cpu_perf_cnt_9,
+	output [31:0] cpu_perf_cnt_10,
+	output [31:0] cpu_perf_cnt_11,
+	output [31:0] cpu_perf_cnt_12,
+	output [31:0] cpu_perf_cnt_13,
+	output [31:0] cpu_perf_cnt_14,
+	output [31:0] cpu_perf_cnt_15,
+
+	output [69:0] inst_retire
+);
+
+/* The following signal is leveraged for behavioral simulation, 
+* which is delivered to testbench.
+*
+* STUDENTS MUST CONTROL LOGICAL BEHAVIORS of THIS SIGNAL.
+*
+* inst_retired (70-bit): detailed information of the retired instruction,
+* mainly including (in order) 
+* { 
+*   reg_file write-back enable  (69:69,  1-bit),
+*   reg_file write-back address (68:64,  5-bit), 
+*   reg_file write-back data    (63:32, 32-bit),  
+*   retired PC                  (31: 0, 32-bit)
+* }
+*
+*/
+
+// TODO: Please add your custom CPU code here
+	reg [31:0] Instruction_reg;
+	reg [31:0] Read_data_reg;
+
+	//指令数据
+	wire			RF_wen;
+	wire [4:0]		RF_waddr;
+	wire [31:0]		RF_wdata;
+	wire [6:0]              opcode;
+	wire [4:0]              rs1;
+	wire [4:0]              rs2;
+	wire [4:0]              rd;
+	wire [2:0]              funct3;
+	wire [6:0]              funct7;
+	wire [11:0]             imm_I;
+	wire [11:0]             imm_S;
+	wire [12:0]             imm_B;
+	wire [31:0]             imm_U;
+	wire [20:0]             imm_J;
+	wire [3:0]              instrtype;
+	
+	wire [25:0]             distance;   
+	wire [31:0]             next;
+	wire [31:0]             target; 
+
+	assign next = PC + 4;
+	assign opcode = Instruction_reg[6:0];
+        assign rd = Instruction_reg[11:7];
+	assign funct3 = Instruction_reg[14:12];	
+	assign rs1 = Instruction_reg[19:15];
+	assign rs2 = Instruction_reg[24:20];
+	assign funct7 = Instruction_reg[31:25];
+	assign imm_I = Instruction_reg[31:20];
+	assign imm_S[4:0] = Instruction_reg[11:7];
+	assign imm_S[11:5] = Instruction_reg[31:25];
+	assign {imm_B[4:1],imm_B[11]} = Instruction_reg[11:7];
+	assign {imm_B[12],imm_B[10:5]} = Instruction_reg[31:25];
+	assign imm_U[31:12] = Instruction_reg[31:12];
+	assign {imm_J[20],imm_J[10:1],imm_J[11],imm_J[19:12]} = Instruction_reg[31:12];
+	assign imm_B[0] = 1'b0;
+	assign imm_U[11:0] = 12'b0;
+	assign imm_J[0] = 1'b0;
+	assign instrtype = {opcode[6:4],opcode[2]};
+
+	localparam RTYPE = 4'b0110;
+	localparam ITYPE = 4'b0010;
+	localparam LTYPE = 4'b0000;
+	localparam STYPE = 4'b0100;
+	localparam JTYPE = 4'b1101;
+	localparam BTYPE = 4'b1100;
+	//UTYPE : type[1:0]=2'11
+
+	//rf数据
+	wire [4:0]  waddr;
+	wire [4:0]  raddr1;
+	wire [4:0]  raddr2;
+	wire        wen;
+	wire        wen1;
+	wire [31:0] wdata;
+	wire [31:0] rdata1;
+	wire [31:0] rdata2;
+
+	assign RF_waddr = waddr;
+	assign RF_wdata = wdata;
+	assign wen1 = ~((instrtype==STYPE) | (instrtype==BTYPE));    //sb不写
+	assign waddr = rd;
+	assign wdata = ({32{(instrtype==RTYPE) | (instrtype==ITYPE)}} & wdata_RI) |
+	               ({32{instrtype==LTYPE}} & wdata_L) |
+		       ({32{instrtype[1:0]==2'b11}} & wdata_U) | 
+		       ({32{instrtype==JTYPE}} & wdata_J);
+	assign raddr1 = rs1; 
+	assign raddr2 = rs2;
+
+	//shifter数据. 
+	wire [31:0] A_shifter;
+	wire [ 4:0] B_shifter;
+	wire [ 4:0] B_shifter_R;  
+	wire [ 4:0] B_shifter_I;     
+	wire [ 1:0] Shiftop; 
+	wire [31:0] Result_shifter;
+
+	assign A_shifter = rdata1;
+	assign B_shifter = ({5{~opcode[5]}} & B_shifter_I) | ({5{opcode[5]}} & B_shifter_R);
+	assign Shiftop = {funct3[2],funct7[5]};
+
+	//alu数据
+	wire [31:0]  A_alu;
+	wire [31:0]  B_alu;
+	wire [ 2:0]  ALUop;
+	wire         Overflow;
+	wire         CarryOut;
+	wire         Zero;
+	wire [31:0]  Result_alu;
+	localparam SRL = 3'b101;
+	localparam SLL = 3'b001;
+	localparam ADD = 3'b000;
+	localparam SLT = 3'b010;
+	localparam SLTU = 3'b011;
+	localparam SUB = 3'b001;
+
+	assign A_alu = ({32{(instrtype==RTYPE) | (instrtype==ITYPE)}} & A_alu_RI )
+			| ({32{(instrtype==LTYPE | instrtype==STYPE)}} & A_alu_LS)
+			| ({32{instrtype==BTYPE}} & A_alu_b)
+			| ({32{instrtype==JTYPE}} & A_alu_J)
+			| ({32{instrtype[1:0]==2'b11}} & A_alu_U);
+	assign B_alu = ({32{instrtype==RTYPE}} & B_alu_R )
+			| ({32{instrtype==ITYPE}} & B_alu_I)
+			| ({32{(instrtype==LTYPE | instrtype==STYPE)}} & B_alu_LS)
+			| ({32{instrtype==BTYPE}} & B_alu_b)
+			| ({32{instrtype==JTYPE}} & B_alu_J)
+			| ({32{instrtype[1:0]==2'b11}} & B_alu_U);
+	assign ALUop = ({3{(instrtype==RTYPE) | (instrtype==ITYPE)}} & ALUop_RI )
+			| ({3{(instrtype==LTYPE | instrtype==STYPE)}} & ALUop_LS)
+			| ({3{instrtype==BTYPE}} & ALUop_b)
+			| ({3{instrtype==JTYPE}} & ALUop_J)
+			| ({3{instrtype[1:0]==2'b11}} & ALUop_U);
+
+	//RI-type数据
+	wire [31:0]  wdata_RI;
+	wire [31:0]  A_alu_RI;
+	wire [31:0]  B_alu_R;
+	wire [ 2:0]  ALUop_RI;
+	wire [31:0]  B_alu_I;
+
+	//J
+	wire [31:0]  wdata_J;
+	wire [31:0]  target_J;
+	wire [31:0]  A_alu_J;
+	wire [31:0]  B_alu_J;
+	wire [ 2:0]  ALUop_J;
+
+	//load store
+	wire [31:0]     wdata_L;
+	wire [ 7:0]     read_b;
+	wire [15:0]     read_h;
+	wire [ 3:0]     wsign1;
+	wire [31:0]     A_alu_LS;
+	wire [31:0]     B_alu_LS;
+	wire [ 2:0]     ALUop_LS; 
+
+	//branch
+	localparam BEQ = 3'b000;
+	localparam BNE = 3'b001;
+	localparam BLT = 3'b100;
+	localparam BGE = 3'b101;
+	localparam BLTU = 3'b110;
+	localparam BGEU = 3'b111;
+	wire [31:0]     A_alu_b;
+	wire [31:0]     B_alu_b;
+	wire [ 2:0]     ALUop_b;
+	wire [31:0]     target_b;
+
+	//U
+	wire [31:0]     A_alu_U;
+	wire [31:0]     B_alu_U;
+	wire [ 2:0]     ALUop_U;
+	wire [31:0]     wdata_U;
+
+	//multiple
+	wire [63:0]	MUL_result;			//乘法完整结果
+	wire [31:0]	MUL_data;			//MUL操作结果
+	assign MUL_result = rdata1 * rdata2;
+	assign MUL_data = (funct3 == 3'b0) ? MUL_result[31:0] : MUL_result[63:32];
+
+
+        //R-type  opcode==0110011
+	assign ALUop_RI = ({3{~(funct7[5] & opcode[5])}} & funct3) | ({3{funct7[5] & opcode[5]}} & SUB); // 设sub操作码为001
+	assign wdata_RI = ({32{((funct3 == SRL) | (funct3 == SLL)) & (funct7 != 7'b0000001)}} & Result_shifter) | ({32{~((funct3 == SRL) | (funct3 == SLL)) & (funct7 != 7'b0000001)}} & Result_alu) | ({32{(funct7 == 7'b0000001)}} & MUL_data);
+	assign A_alu_RI = rdata1;
+	assign B_alu_R = rdata2;
+	assign B_shifter_R = rdata2[4:0];
+	//I-type opcode=0010011  jalr: opcode=1100111
+	assign B_alu_I = {{20{imm_I[11]}},imm_I};
+	assign B_shifter_I = imm_I[4:0];
+
+	//S-type opcode=0100011
+	assign wsign1 = {Result_alu[1:0],funct3[1:0]};
+	assign Write_strb = ({4{~wsign1[3] & ~wsign1[2] & ~wsign1[1] & ~wsign1[0]}} & 4'b0001)
+			| ({4{~wsign1[3] & wsign1[2] & ~wsign1[1] & ~wsign1[0]}} & 4'b0010)
+			| ({4{wsign1[3] & ~wsign1[2] & ~wsign1[1] & ~wsign1[0]}} & 4'b0100)
+			| ({4{wsign1[3] & wsign1[2] & ~wsign1[1] & ~wsign1[0]}} & 4'b1000)
+			| ({4{~wsign1[3] & ~wsign1[2] & ~wsign1[1] & wsign1[0]}} & 4'b0011)
+			| ({4{wsign1[3] & ~wsign1[2] & ~wsign1[1] & wsign1[0]}} & 4'b1100)
+			| ({4{~wsign1[3] & ~wsign1[2] & wsign1[1] & ~wsign1[0]}} & 4'b1111);
+	assign Write_data = ({32{~funct3[1] & ~funct3[0]}} & {4{rdata2[7:0]}}) | 
+	                    ({32{~funct3[1] &  funct3[0]}} & {2{rdata2[15:0]}}) | 
+			    ({32{ funct3[1] & ~funct3[0]}} &  rdata2);
+	assign A_alu_LS = rdata1;
+	assign B_alu_LS = ({{20{imm_S[11]}},imm_S} & {32{opcode[5]}}) | ({{20{imm_I[11]}},imm_I} & {32{~opcode[5]}});
+	assign ALUop_LS = ADD;
+	assign Address = Result_alu & {{30{1'b1}},2'b0};
+
+	//L-type opcode=0000011
+	assign wdata_L = ({32{~funct3[1] & ~funct3[0] & funct3[2]}} & {24'b0,read_b})
+				| ({32{~funct3[1] & ~funct3[0] & ~funct3[2]}} & {{24{read_b[7]}},read_b})
+				| ({32{~funct3[1] & funct3[0] & funct3[2]}} & {16'b0,read_h[15:0]})
+				| ({32{~funct3[1] & funct3[0] & ~funct3[2]}} & {{16{read_h[15]}},read_h[15:0]})
+				| ({32{funct3[1] & ~funct3[0]}} & Read_data_reg);
+	assign read_b = ({8{~Result_alu[1] &~Result_alu[0]}} & Read_data_reg[7:0])
+			| ({8{~Result_alu[1] & Result_alu[0]}} & Read_data_reg[15:8])
+			| ({8{Result_alu[1] & ~Result_alu[0]}} & Read_data_reg[23:16])
+			| ({8{Result_alu[1] & Result_alu[0]}} & Read_data_reg[31:24]);
+	assign read_h = ({16{~Result_alu[1] & ~Result_alu[0]}} & Read_data_reg[15:0])
+			| ({16{Result_alu[1] & ~Result_alu[0]}} & Read_data_reg[31:16]);
+
+	//B-type  opcode=1100011
+	wire isbranch;
+	assign isbranch = (((funct3 == BEQ) & (Result_alu == 32'b0)) | 
+	                  ((funct3 == BNE) & (Result_alu != 32'b0)) |
+			  (((funct3 == BLT) | (funct3 == BLTU)) & (Result_alu == 32'b1)) |
+			  (((funct3 == BGE) | (funct3 == BGEU)) & (Result_alu == 32'b0))) & 1;
+	assign target_b = {{19{imm_B[11]}},imm_B};
+	assign ALUop_b = ({3{funct3[2] & funct3[1]}} & SLTU ) | ({3{funct3[2] & ~funct3[1]}} & SLT) | ({3{~funct3[2] & ~funct3[1]}} & SUB);
+	assign A_alu_b = rdata1;
+	assign B_alu_b = rdata2;
+
+	//J-type jal=1101111, jalr=1100111
+	assign target_J = {Result_alu[31:1],1'b0}; 
+	assign wdata_J = PC_Writeback_reg;
+	assign A_alu_J = ({32{~opcode[3]}} & rdata1) | ({32{opcode[3]}} & PC);  //jalr and jal
+	assign B_alu_J = ({32{~opcode[3]}} & {{20{imm_I[11]}},imm_I}) | ({32{opcode[3]}} & {{11{imm_J[20]}},imm_J});
+	assign ALUop_J = ADD;
+
+       //U-type   LUI=0110111 AUIPC=0010111
+       assign ALUop_U = ADD;
+       assign A_alu_U = imm_U;
+       assign B_alu_U = ({32{opcode[5]}} & 32'b0) | ({32{~opcode[5]}} & PC);
+       assign wdata_U = Result_alu;
+
+
+
+       //状态定义
+	localparam INIT = 10'b0000000001; 
+	localparam   IF = 10'b0000000010;
+	localparam   IW = 10'b0000000100;
+	localparam   ID = 10'b0000001000;
+	localparam   EX = 10'b0000010000;
+	localparam   ST = 10'b0000100000;
+	localparam   LD = 10'b0001000000;
+	localparam  RDW = 10'b0010000000;
+	localparam   WB = 10'b0100000000;
+	localparam  STW = 10'b1000000000;
+
+	reg [9:0] current_state;
+	reg [9:0] next_state;
+
+	//PART1
+	always @ (posedge clk)begin
+		if(rst==1'b1)
+			current_state <= INIT;
+		else
+			current_state <= next_state;
+	end
+
+	//PART2
+	wire nopif;
+	assign nopif = current_state[3] & (Instruction_reg[31:0] == 32'b0); //ID时判断
+	always @ (*)begin//为什么用阻塞赋值
+		case(current_state)
+			INIT:   next_state = IF;
+			IF:begin
+				if(Inst_Req_Ready==1)
+					next_state = IW;
+				else 
+					next_state = IF;
+			end
+			IW:begin
+				if(Inst_Valid==1)
+					next_state = ID;
+				else
+					next_state = IW;
+			end
+			ID:begin
+				if(nopif)
+					next_state = IF;
+				else
+					next_state = EX;
+			end
+			EX:begin
+				if(instrtype==RTYPE || instrtype==ITYPE || instrtype==JTYPE || instrtype[1:0]==2'b11)
+					next_state = WB;
+				else if(instrtype==BTYPE)
+					next_state = IF;
+				else if(instrtype==STYPE)
+					next_state = ST;
+				else if(instrtype==LTYPE)
+					next_state = LD;
+				else
+					next_state = INIT;
+			end
+			WB:     next_state = IF;
+			ST:begin
+				if(Mem_Req_Ready == 1)
+					next_state = STW;
+				else
+					next_state = ST;
+			end
+			LD:begin
+				if(Mem_Req_Ready == 1)
+					next_state = RDW;
+				else
+					next_state = LD;
+			end
+			RDW:begin
+				if(Read_data_Valid == 1)
+					next_state = WB;
+				else
+					next_state = RDW;
+			end
+			STW:begin
+				if(Mem_Req_Ready == 1)
+					next_state = IF;
+				else
+					next_state = STW;
+			end
+			default: next_state = INIT;
+		endcase
+	end
+
+	//PART3
+	assign Inst_Req_Valid = current_state[1];   //current_state == IF
+	assign Inst_Ready = current_state[2] | current_state[0];     //IW or INIT
+	assign Read_data_Ready = current_state[7] | current_state[0];   //LD or INIT
+	assign MemWrite = current_state[5];
+	assign MemRead = current_state[6];
+	assign wen = current_state[8] & wen1;
+	assign RF_wen = wen;
+
+	//PC
+	assign target = ({32{instrtype==JTYPE}} & target_J) | ({32{(instrtype==BTYPE) & isbranch}} & (target_b + PC )) | ({32{~((instrtype==BTYPE) & isbranch) & (instrtype!=JTYPE)}} & next);
+	always@(posedge clk)begin
+		if(current_state == INIT)  //high is effective!
+			PC <= 0;
+		else if(current_state[4] | nopif ) // current_state == EX or nop
+			PC <= target;
+		else
+			PC <= PC;
+	end
+
+	//pc write ; pc_reg
+	reg [31:0] PC_Writeback_reg;
+	reg [31:0] PC_reg;
+	always @ (posedge clk)begin
+		if(current_state[3])
+			PC_Writeback_reg <= PC + 4;
+		else
+			PC_Writeback_reg <= PC_Writeback_reg;
+	end
+	always @ (posedge clk)begin
+		if(current_state[3])
+			PC_reg <= PC;
+		else  
+			PC_reg <= PC_reg;
+	end
+
+	//Instruction reg
+	always@(posedge clk)begin
+		if(Inst_Valid)
+			Instruction_reg <= Instruction;
+		else
+			Instruction_reg <= Instruction_reg;
+	end
+
+	//Read_data reg
+	always@(posedge clk)begin
+		if(Read_data_Valid)
+			Read_data_reg <= Read_data;
+		else
+			Read_data_reg <= Read_data_reg;
+	end
+
+	//操作数 reg
+	reg [31:0] A_reg;
+	always@(posedge clk)begin
+		if(current_state[3])begin  //current_state == ID
+		        if(((instrtype==RTYPE) || (instrtype==ITYPE)) && ((funct3 == SRL) || (funct3 == SLL)))
+			        A_reg <= A_shifter;
+			else
+			        A_reg <= A_alu;
+		end
+	end
+	reg [31:0] B_reg;
+	always@(posedge clk)begin
+		if(current_state[3])begin  //current_state == ID
+		        if(((instrtype==RTYPE) || (instrtype==ITYPE)) && ((funct3 == SRL) || (funct3 == SLL)))
+			        B_reg <= {27'b0,B_shifter};
+			else
+			        B_reg <= B_alu;
+		end
+	end
+
+	assign inst_retire = inst_retire_reg;//69'b0;
+	reg [69:0] inst_retire_reg;
+	always@(posedge clk)begin
+		if(wen1==1)begin
+			inst_retire_reg <= {wen,waddr,wdata,PC_reg};
+		end
+	end
+		
+	//周期计数器
+	reg [31:0] cycle_cnt;
+	assign cpu_perf_cnt_0 = cycle_cnt;
+	always@(posedge clk)begin
+		if(rst == 1'b1)
+			cycle_cnt <= 32'b0;
+		else
+			cycle_cnt <= cycle_cnt + 32'b1;
+	end
+
+	//指令数计数器
+	reg [31:0] instruction_cnt;
+	assign cpu_perf_cnt_1 = instruction_cnt;
+	always @ (posedge clk)begin
+		if(rst == 1'b1)
+		        instruction_cnt <= 32'b0;
+		else if(current_state[3])  //译码，ID
+		        instruction_cnt <= instruction_cnt + 32'b1;
+		else
+		        instruction_cnt <= instruction_cnt;
+	end
+
+	//访存次数计数器
+	reg [31:0] WL_cnt;
+	assign cpu_perf_cnt_2 = WL_cnt;
+	reg signWL;
+	always @ (posedge clk)begin
+		if(rst == 1'b1)
+		        WL_cnt <= 32'b0;
+		else if((current_state == ST || current_state == LD) & signWL)  
+		        WL_cnt <= WL_cnt + 32'b1;
+		else
+		        WL_cnt <= WL_cnt;
+	end
+	always @ (posedge clk)begin
+                if(current_state == ST || current_state == LD)  
+		        signWL <= 1'b0;
+		else
+		        signWL <= 1'b1;
+	end
+
+	//访存延时
+	reg [31:0] WL_delay;
+	assign cpu_perf_cnt_3 = WL_delay;
+	always @ (posedge clk)begin
+		if(rst == 1'b1)
+		        WL_delay <= 32'b0;
+		else if((current_state == ST || current_state == LD) || (current_state == RDW))  
+		        WL_delay <= WL_delay + 32'b1;
+		else
+		        WL_delay <= WL_delay;
+	end
+
+	//alu实例化
+	alu R_alu(
+		.A        (A_reg),
+		.B        (B_reg),
+		.ALUop    (ALUop),
+		.Overflow (Overflow),
+		.CarryOut (CarryOut),
+		.Zero     (Zero),
+		.Result   (Result_alu)
+	);
+
+	//rf实例化
+	reg_file R_reg_file(
+		.waddr    (waddr),
+		.raddr1   (raddr1),
+		.raddr2   (raddr2),
+		.wen      (wen),
+		.wdata    (wdata),
+		.rdata1   (rdata1),
+		.rdata2   (rdata2),
+		.clk      (clk)
+	);
+
+	//shifter实例化
+	shifter R_shifter(
+		.A        (A_reg),
+		.B        (B_reg[4:0]),
+		.Shiftop  (Shiftop),
+		.Result   (Result_shifter)
+	);     
+
+endmodule
+
+
